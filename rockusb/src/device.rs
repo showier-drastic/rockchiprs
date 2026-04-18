@@ -195,6 +195,8 @@ struct DeviceIOInner<D, T> {
     offset: u64,
     size: u64,
     buffer: Box<[u8; 512]>,
+    // The sector that the buffer currently holds data for
+    buffer_sector: u64,
     // Whether or not the buffer is dirty
     state: BufferState,
 }
@@ -220,6 +222,7 @@ where
                 offset: 0,
                 size,
                 buffer: Box::new([0u8; 512]),
+                buffer_sector: 0,
                 state: BufferState::Invalid,
             },
         })
@@ -281,13 +284,16 @@ where
                 len: io_len.min(MAXIO_SIZE) as usize,
             })
         } else {
-            if self.state == BufferState::Invalid {
-                let sector = self.current_sector() as u32;
+            let current_sector = self.current_sector();
+            if self.state == BufferState::Invalid || self.buffer_sector != current_sector {
+                self.flush_buffer().await?;
+                let sector = current_sector as u32;
                 self.device
                     .borrow_mut()
                     .read_lba(sector, self.buffer.as_mut())
                     .await
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))?;
+                self.buffer_sector = current_sector;
                 self.state = BufferState::Valid;
             }
             Ok(IOOperation::Buffered {
@@ -314,7 +320,7 @@ where
 
     async fn flush_buffer(&mut self) -> std::io::Result<()> {
         if self.state == BufferState::Dirty {
-            let sector = self.current_sector() as u32;
+            let sector = self.buffer_sector as u32;
             self.device
                 .borrow_mut()
                 .write_lba(sector, self.buffer.as_mut())
@@ -479,6 +485,7 @@ where
             transport: PhantomData,
             offset: 0,
             buffer: Box::new([0u8; 512]),
+            buffer_sector: 0,
             size,
             state: BufferState::Invalid,
         };
